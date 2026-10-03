@@ -138,6 +138,7 @@ DConfigBackend::~DConfigBackend()
 }
 
 static QString _globalAppId;
+
 class Q_DECL_HIDDEN DConfigPrivate : public DObjectPrivate
 {
 public:
@@ -154,12 +155,39 @@ public:
 
     virtual ~DConfigPrivate() override;
 
+#ifndef D_DISABLE_DCONFIG
+    // Checks whether the meta file for this config is installed locally,
+    // using the same lookup logic as dde-dconfig-daemon
+    // (DConfigMetaImpl::metaPath). Used to distinguish "config resource
+    // never installed" (expected, debug-level) from real backend failures.
+    bool metaInstalled() const
+    {
+        DConfigFile configFile(appId, name, subpath);
+        return !configFile.meta()->metaPath().isEmpty();
+    }
+#endif
+
     inline bool invalid() const
     {
         const bool valid = backend && backend->isValid();
-        if (!valid)
+        if (!valid) {
+#ifndef D_DISABLE_DCONFIG
+            // A missing meta file means the config resource was simply never
+            // installed; demote that expected case to debug output and keep
+            // the warning for real backend failures (meta present but the
+            // backend could not be created, e.g. daemon unavailable).
+            if (metaInstalled()) {
+                qCWarning(cfLog, "DConfig is invalid of appid=%s name=%s, subpath=%s",
+                          qPrintable(appId), qPrintable(name), qPrintable(subpath));
+            } else {
+                qCDebug(cfLog, "DConfig is invalid of appid=%s name=%s, subpath=%s (meta file not installed)",
+                        qPrintable(appId), qPrintable(name), qPrintable(subpath));
+            }
+#else
             qCWarning(cfLog, "DConfig is invalid of appid=%s name=%s, subpath=%s",
                       qPrintable(appId), qPrintable(name), qPrintable(subpath));
+#endif
+        }
 
         return !valid;
     }
@@ -379,7 +407,15 @@ public:
         const QDBusObjectPath dbus_path = dbus_reply.value();
         const auto path = dbus_path.path(); // 显式拷贝，避免其它线程共用systemBus连接而修改dbus数据
         if (dbus_reply.isError() || path.isEmpty()) {
-            qCWarning(cfLog, "Can't acquire config manager. error:\"%s\"", qPrintable(dbus_reply.error().message()));
+            // The daemon replies with a generic Failed error for a missing
+            // resource, which cannot be told apart by error name; check the
+            // meta path locally to keep real failures visible.
+            if (owner->metaInstalled()) {
+                qCWarning(cfLog, "Can't acquire config manager. error:\"%s\"", qPrintable(dbus_reply.error().message()));
+            } else {
+                qCDebug(cfLog, "Can't acquire config manager. error:\"%s\" (meta file not installed)",
+                        qPrintable(dbus_reply.error().message()));
+            }
             return false;
         } else {
             qCDebug(cfLog, "dbus path=\"%s\"", qPrintable(path));
